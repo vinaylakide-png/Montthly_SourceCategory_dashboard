@@ -57,6 +57,11 @@ st.markdown("""
     font-size: 15px; font-weight: 700; color: #1a2340;
     border-bottom: 2px solid #c9a84c; padding-bottom: 6px; margin-bottom: 12px;
 }
+.filter-bar {
+    background: #ffffff; border: 1px solid #dce3ee; border-radius: 6px;
+    padding: 10px 16px; margin-bottom: 14px;
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
 [data-testid="stSidebar"] { background-color: #1a2340 !important; border-right: none; }
 [data-testid="stSidebar"] .stMarkdown,
 [data-testid="stSidebar"] label,
@@ -97,6 +102,23 @@ hr { border-color: #dce3ee; margin: 1.2rem 0; }
     font-weight: 600; font-size: 12px;
 }
 .stDownloadButton > button:hover { background-color: #c9a84c !important; color: #1a2340 !important; }
+/* VINAY ADDED*/
+/* Change multiselect selected values (Year / Month / Quarter chips) */
+[data-baseweb="tag"] {
+    background-color: #66BB6A33 !important;   /* light green transparent background */
+    color: #2E7D32 !important;                /* darker green text */
+    border: 1px solid #66BB6A !important;     /* green border */
+}
+
+/* Change close (X) icon color inside chips */
+[data-baseweb="tag"] svg {
+    fill: #2E7D32 !important;
+}
+
+/* Hover effect */
+[data-baseweb="tag"]:hover {
+    background-color: #66BB6A66 !important;
+}
 
 /* ── Main content: force all widget labels and radio text to dark ── */
 .main label { color: #1a2340 !important; }
@@ -163,9 +185,21 @@ def get_quarter(month_name):
     if idx in (10,11,12): return "Q4 (Oct-Dec)"
     return "Unknown"
 
+def get_quarter_short(month_name):
+    idx = MONTH_FULL.index(month_name) + 1 if month_name in MONTH_FULL else 0
+    if idx in (1,2,3):    return "Q1"
+    if idx in (4,5,6):    return "Q2"
+    if idx in (7,8,9):    return "Q3"
+    if idx in (10,11,12): return "Q4"
+    return "Unknown"
+
 def get_half(month_name):
     idx = MONTH_FULL.index(month_name) + 1 if month_name in MONTH_FULL else 0
     return "H1 (Jan-Jun)" if idx <= 6 else "H2 (Jul-Dec)"
+
+def get_half_short(month_name):
+    idx = MONTH_FULL.index(month_name) + 1 if month_name in MONTH_FULL else 0
+    return "H1" if idx <= 6 else "H2"
 
 # =============================================================================
 #  DATABASE LOADERS
@@ -208,13 +242,11 @@ def load_file(uploaded_file):
     name = uploaded_file.name.lower()
     if name.endswith(".csv"):
         raw_bytes = uploaded_file.read()
-        # Try encodings most common in Windows-exported CSVs
         for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1", "iso-8859-1"):
             try:
                 return pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
             except (UnicodeDecodeError, pd.errors.ParserError):
                 continue
-        # Last resort: chardet auto-detection
         try:
             import chardet
             detected = chardet.detect(raw_bytes)
@@ -222,7 +254,6 @@ def load_file(uploaded_file):
             st.info(f"ℹ️ Detected encoding: **{enc}** (confidence: {detected.get('confidence', 0):.0%})")
             return pd.read_csv(io.BytesIO(raw_bytes), encoding=enc)
         except ImportError:
-            # chardet not installed — force latin-1 which never raises UnicodeDecodeError
             st.warning("⚠️ Could not auto-detect encoding. Falling back to latin-1.")
             return pd.read_csv(io.BytesIO(raw_bytes), encoding="latin-1")
     elif name.endswith((".xlsx", ".xls")):
@@ -248,7 +279,6 @@ with st.sidebar:
     )
     df_raw = None
 
-    # ── Upload ────────────────────────────────────────────────────────────────
     if src == "Upload File (CSV / Excel)":
         uploaded = st.file_uploader(
             "📁 Drop or browse file",
@@ -262,7 +292,6 @@ with st.sidebar:
                 st.session_state.source_label   = uploaded.name
                 st.success(f"✅ Loaded {len(df_raw):,} rows")
 
-    # ── MySQL ─────────────────────────────────────────────────────────────────
     elif src == "MySQL":
         with st.expander("🔐 MySQL Credentials", expanded=True):
             my_host     = st.text_input("Host",     value="localhost",         key="my_host")
@@ -284,7 +313,6 @@ with st.sidebar:
                 st.session_state.source_label = f"MySQL: {my_db}"
                 st.success(f"✅ {len(df_raw):,} rows loaded")
 
-    # ── Snowflake ─────────────────────────────────────────────────────────────
     elif src == "Snowflake":
         with st.expander("🔐 Snowflake Credentials", expanded=True):
             sf_account  = st.text_input("Account",   value="yourorg-youracccount", key="sf_acc")
@@ -377,6 +405,11 @@ period_labels = [f"{m} {y}" for m, y in periods_list]
 if not period_labels:
     st.error("No valid month periods found. Check your Month and Year column mapping."); st.stop()
 
+# Derive unique years, quarters, months from periods_list
+all_years     = sorted(set(y for _, y in periods_list))
+all_quarters  = sorted(set(get_quarter_short(m) for m, _ in periods_list))
+all_months_available = sorted(set(m for m, _ in periods_list), key=lambda x: MONTH_FULL.index(x))
+
 # ── Period Selection ──────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("---")
@@ -403,6 +436,21 @@ df_prev   = get_period_df(prev_month_name,   prev_year)
 
 def cert_sum_for_period(month_name, year):
     return get_period_df(month_name, year).groupby(cert_type_col)[count_col].sum()
+
+# =============================================================================
+#  HELPER: Filter periods_list by Year / Month / Quarter
+# =============================================================================
+def filter_periods(periods, sel_years=None, sel_months=None, sel_quarters=None):
+    result = []
+    for m, y in periods:
+        if sel_years and y not in sel_years:
+            continue
+        if sel_months and m not in sel_months:
+            continue
+        if sel_quarters and get_quarter_short(m) not in sel_quarters:
+            continue
+        result.append((m, y))
+    return result
 
 # =============================================================================
 #  AGGREGATIONS
@@ -451,7 +499,7 @@ st.markdown(f"""
     Agencies: <b>{total_agencies:,}</b> &nbsp;|&nbsp;
     Cert Types: <b>{total_cert_types:,}</b> &nbsp;|&nbsp;
     Current: <b>{latest_label}</b> &nbsp;|&nbsp;
-    Compare: <b>{compare_label_str}</b>
+    Previous: <b>{compare_label_str}</b>
   </div>
 </div>""", unsafe_allow_html=True)
 
@@ -473,7 +521,7 @@ with k2:
     </div>""", unsafe_allow_html=True)
 with k3:
     st.markdown(f"""<div class="metric-card">
-        <div class="label">Unique Agency IDs (Count ≥ 1)</div>
+        <div class="label">Unique Agency's (Count ≥ 1)</div>
         <div class="value">{unique_latest:,}</div>
         <div class="{delta_class(unique_delta)}">{delta_arrow(unique_delta)} {abs(unique_delta):,} vs {compare_label_str}</div>
     </div>""", unsafe_allow_html=True)
@@ -614,86 +662,142 @@ else:
 st.markdown("---")
 
 # =============================================================================
-#  UNIQUE AGENCIES TREND
+#  UNIQUE AGENCY'S TREND  (renamed + with filters)
 # =============================================================================
-st.markdown('<div class="section-header">🏢 Unique Agency IDs per Period</div>', unsafe_allow_html=True)
+st.markdown('<div class="section-header">🏢 Unique Agency\'s per Period</div>', unsafe_allow_html=True)
+
+# ── Filters for Unique Agencies chart ────────────────────────────────────────
+ua_f1, ua_f2, ua_f3 = st.columns(3)
+with ua_f1:
+    ua_year_filter = st.multiselect(
+        "📅 Year", all_years, default=all_years, key="ua_year"
+    )
+with ua_f2:
+    ua_month_filter = st.multiselect(
+        "🗓️ Month", all_months_available, default=all_months_available, key="ua_month"
+    )
+with ua_f3:
+    ua_quarter_filter = st.multiselect(
+        "📊 Quarter", all_quarters, default=all_quarters, key="ua_quarter"
+    )
+
+ua_periods = filter_periods(
+    periods_list,
+    sel_years=ua_year_filter if ua_year_filter else None,
+    sel_months=ua_month_filter if ua_month_filter else None,
+    sel_quarters=ua_quarter_filter if ua_quarter_filter else None,
+)
+
 trend_rows = []
-for m, y in periods_list:
+for m, y in ua_periods:
     agg = get_period_df(m, y).groupby(agency_id_col)[count_col].sum()
     trend_rows.append({'Period': f"{m} {y}", 'Unique_Agency_IDs': int((agg >= 1).sum())})
 trend_df = pd.DataFrame(trend_rows)
 
-fig_unique = go.Figure()
-for _, row in trend_df.iterrows():
-    is_l = row['Period'] == latest_label
-    is_c = row['Period'] in selected_compare_labels
-    fig_unique.add_trace(go.Bar(
-        x=[row['Period']], y=[row['Unique_Agency_IDs']],
-        marker=dict(
-            color=BAR_LATEST if is_l else (BAR_COMPARE if is_c else BAR_DEFAULT),
-            line=dict(color=BORD_LATEST if is_l else (BORD_COMPARE if is_c else BORD_DEFAULT), width=1.5),
-        ),
-        text=[f"{row['Unique_Agency_IDs']:,}"], textposition='outside',
-        textfont=dict(size=10, color='#3a4d6e'), showlegend=False, name=row['Period'],
-    ))
-fig_unique.add_trace(go.Scatter(
-    x=trend_df['Period'], y=trend_df['Unique_Agency_IDs'],
-    mode='lines+markers', line=dict(color=TREND_COLOR, width=2),
-    marker=dict(size=6, color=TREND_COLOR), name='Trend', showlegend=True,
-))
-fig_unique.update_layout(
-    **CHART_TEMPLATE['layout'], height=360,
-    yaxis_title='Unique Agency IDs', bargap=0.25,
-    legend=dict(x=0.01, y=0.99, bgcolor='rgba(0,0,0,0)'),
-    margin=dict(t=10, b=60, l=60, r=30),
-)
-fig_unique.update_xaxes(tickangle=35)
-st.plotly_chart(fig_unique, use_container_width=True)
-
-st.markdown("---")
-
-# =============================================================================
-#  MONTHLY TOTALS + TOP MOVERS
-# =============================================================================
-col1, col2 = st.columns([3, 2])
-with col1:
-    st.markdown('<div class="section-header">📈 Total Certifications per Period</div>', unsafe_allow_html=True)
-    total_trend = [{'Period': f"{m} {y}", 'Total': int(get_period_df(m, y)[count_col].sum())} for m, y in periods_list]
-    total_trend_df = pd.DataFrame(total_trend)
-
-    fig_months = go.Figure()
-    for _, row in total_trend_df.iterrows():
+if trend_df.empty:
+    st.warning("No data for selected filters.")
+else:
+    fig_unique = go.Figure()
+    for _, row in trend_df.iterrows():
         is_l = row['Period'] == latest_label
         is_c = row['Period'] in selected_compare_labels
-        fig_months.add_trace(go.Bar(
-            x=[row['Period']], y=[row['Total']],
+        fig_unique.add_trace(go.Bar(
+            x=[row['Period']], y=[row['Unique_Agency_IDs']],
             marker=dict(
                 color=BAR_LATEST if is_l else (BAR_COMPARE if is_c else BAR_DEFAULT),
                 line=dict(color=BORD_LATEST if is_l else (BORD_COMPARE if is_c else BORD_DEFAULT), width=1.5),
             ),
-            text=[f"{row['Total']:,}"], textposition='outside',
+            text=[f"{row['Unique_Agency_IDs']:,}"], textposition='outside',
             textfont=dict(size=10, color='#3a4d6e'), showlegend=False, name=row['Period'],
         ))
-    fig_months.add_trace(go.Scatter(
-        x=total_trend_df['Period'], y=total_trend_df['Total'],
+    fig_unique.add_trace(go.Scatter(
+        x=trend_df['Period'], y=trend_df['Unique_Agency_IDs'],
         mode='lines+markers', line=dict(color=TREND_COLOR, width=2),
-        marker=dict(size=6, color=TREND_COLOR), name='Trend', yaxis='y2', showlegend=True,
+        marker=dict(size=6, color=TREND_COLOR), name='Trend', showlegend=True,
     ))
-    fig_months.update_layout(
-        **CHART_TEMPLATE['layout'], height=400,
-        yaxis2=dict(overlaying='y', side='right', showgrid=False, tickfont=dict(color=TREND_COLOR)),
+    fig_unique.update_layout(
+        **CHART_TEMPLATE['layout'], height=360,
+        yaxis_title="Unique Agency's", bargap=0.25,
         legend=dict(x=0.01, y=0.99, bgcolor='rgba(0,0,0,0)'),
-        bargap=0.25, margin=dict(t=10, b=60, l=50, r=50),
+        margin=dict(t=10, b=60, l=60, r=30),
     )
-    fig_months.update_xaxes(tickangle=35)
-    st.plotly_chart(fig_months, use_container_width=True)
+    fig_unique.update_xaxes(tickangle=35)
+    st.plotly_chart(fig_unique, use_container_width=True)
+
+st.markdown("---")
+
+# =============================================================================
+#  MONTHLY TOTALS + TOP MOVERS  (with filters on totals chart)
+# =============================================================================
+col1, col2 = st.columns([3, 2])
+with col1:
+    st.markdown('<div class="section-header">📈 Total Certifications per Period</div>', unsafe_allow_html=True)
+
+    # ── Filters for Total Certifications chart ────────────────────────────────
+    tc_f1, tc_f2, tc_f3 = st.columns(3)
+    with tc_f1:
+        tc_year_filter = st.multiselect(
+            "📅 Year", all_years, default=all_years, key="tc_year"
+        )
+    with tc_f2:
+        tc_month_filter = st.multiselect(
+            "🗓️ Month", all_months_available, default=all_months_available, key="tc_month"
+        )
+    with tc_f3:
+        tc_quarter_filter = st.multiselect(
+            "📊 Quarter", all_quarters, default=all_quarters, key="tc_quarter"
+        )
+
+    tc_periods = filter_periods(
+        periods_list,
+        sel_years=tc_year_filter if tc_year_filter else None,
+        sel_months=tc_month_filter if tc_month_filter else None,
+        sel_quarters=tc_quarter_filter if tc_quarter_filter else None,
+    )
+
+    total_trend = [
+        {'Period': f"{m} {y}", 'Total': int(get_period_df(m, y)[count_col].sum())}
+        for m, y in tc_periods
+    ]
+    total_trend_df = pd.DataFrame(total_trend)
+
+    if total_trend_df.empty:
+        st.warning("No data for selected filters.")
+    else:
+        fig_months = go.Figure()
+        for _, row in total_trend_df.iterrows():
+            is_l = row['Period'] == latest_label
+            is_c = row['Period'] in selected_compare_labels
+            fig_months.add_trace(go.Bar(
+                x=[row['Period']], y=[row['Total']],
+                marker=dict(
+                    color=BAR_LATEST if is_l else (BAR_COMPARE if is_c else BAR_DEFAULT),
+                    line=dict(color=BORD_LATEST if is_l else (BORD_COMPARE if is_c else BORD_DEFAULT), width=1.5),
+                ),
+                text=[f"{row['Total']:,}"], textposition='outside',
+                textfont=dict(size=10, color='#3a4d6e'), showlegend=False, name=row['Period'],
+            ))
+        fig_months.add_trace(go.Scatter(
+            x=total_trend_df['Period'], y=total_trend_df['Total'],
+            mode='lines+markers', line=dict(color=TREND_COLOR, width=2),
+            marker=dict(size=6, color=TREND_COLOR), name='Trend', yaxis='y2', showlegend=True,
+        ))
+        fig_months.update_layout(
+            **CHART_TEMPLATE['layout'], height=400,
+            yaxis2=dict(overlaying='y', side='right', showgrid=False, tickfont=dict(color=TREND_COLOR)),
+            legend=dict(x=0.01, y=0.99, bgcolor='rgba(0,0,0,0)'),
+            bargap=0.25, margin=dict(t=10, b=60, l=50, r=50),
+        )
+        fig_months.update_xaxes(tickangle=35)
+        st.plotly_chart(fig_months, use_container_width=True)
 
 with col2:
     st.markdown('<div class="section-header">🔥 Top Agency Movers</div>', unsafe_allow_html=True)
 
+    # ── Agency movers WITHOUT Agency ID ──────────────────────────────────────
     def _build_movers(subset, increasing=True):
-        d = subset[[agency_id_col, agency_name_col, 'Net_Change', 'Pct_Change']].copy()
-        d.columns = ['Agency ID', 'Agency Name', 'Net Δ', '% Δ']
+        d = subset[[agency_name_col, 'Net_Change', 'Pct_Change']].copy()
+        d.columns = ['Agency Name', 'Net Δ', '% Δ']
         if increasing:
             d['Net Δ'] = d['Net Δ'].apply(lambda x: f"+{int(x):,}")
             d['% Δ']   = d['% Δ'].apply(lambda x: f"+{x:.1f}%" if pd.notna(x) else "New")
@@ -710,48 +814,126 @@ with col2:
 st.markdown("---")
 
 # =============================================================================
-#  DATA REPORT TABS
+#  DATA REPORT TABS  (with Year / Month / Quarter / Half-Yearly filters)
 # =============================================================================
 st.markdown('<div class="section-header">📋 Data Reports</div>', unsafe_allow_html=True)
+
+# ── Shared filters for ALL Data Report tabs ───────────────────────────────────
+st.markdown("**🔎 Data Report Filters**")
+dr_f1, dr_f2, dr_f3, dr_f4 = st.columns(4)
+with dr_f1:
+    dr_year = st.multiselect("📅 Year", all_years, default=all_years, key="dr_year")
+with dr_f2:
+    dr_month = st.multiselect("🗓️ Month", all_months_available, default=all_months_available, key="dr_month")
+with dr_f3:
+    dr_quarter = st.multiselect("📊 Quarter", all_quarters, default=all_quarters, key="dr_quarter")
+with dr_f4:
+    dr_half_opts = sorted(set(get_half_short(m) for m, _ in periods_list))
+    dr_half = st.multiselect("📆 Half-Year", dr_half_opts, default=dr_half_opts, key="dr_half")
+
+# Build filtered periods for data reports
+dr_periods = []
+for m, y in periods_list:
+    if dr_year and y not in dr_year: continue
+    if dr_month and m not in dr_month: continue
+    if dr_quarter and get_quarter_short(m) not in dr_quarter: continue
+    if dr_half and get_half_short(m) not in dr_half: continue
+    dr_periods.append((m, y))
+
+dr_period_labels = [f"{m} {y}" for m, y in dr_periods]
+
+if not dr_periods:
+    st.warning("⚠️ No periods match the selected filters. Adjust filters above.")
+    st.stop()
+
+# Build period totals for filtered periods
+dr_total_trend = [
+    {'Period': f"{m} {y}",
+     'Total': int(get_period_df(m, y)[count_col].sum())}
+    for m, y in dr_periods
+]
+dr_total_trend_df = pd.DataFrame(dr_total_trend)
+if len(dr_total_trend_df) > 1:
+    dr_total_trend_df['PoP_Change'] = dr_total_trend_df['Total'].diff().fillna(0).astype(int)
+    dr_total_trend_df['PoP_%']      = (dr_total_trend_df['Total'].pct_change() * 100).round(1).fillna(0)
+else:
+    dr_total_trend_df['PoP_Change'] = 0
+    dr_total_trend_df['PoP_%']      = 0.0
+
+# Build unique agencies per filtered period
+dr_trend_rows = []
+for m, y in dr_periods:
+    agg = get_period_df(m, y).groupby(agency_id_col)[count_col].sum()
+    dr_trend_rows.append({'Period': f"{m} {y}", 'Unique_Agencies': int((agg >= 1).sum())})
+dr_unique_df = pd.DataFrame(dr_trend_rows)
+if len(dr_unique_df) > 1:
+    dr_unique_df['MoM_Change'] = dr_unique_df['Unique_Agencies'].diff().fillna(0).astype(int)
+
 tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
-    "📈 Period Totals", "🏢 Unique Agencies / Period", "🔄 All Agency Changes",
+    "📈 Period Totals", "🏢 Unique Agency's / Period", "🔄 All Agency Changes",
     f"📊 {cert_type_col} Breakdown", "🏆 Top Gainers", "📉 Top Losers", "💾 Full Dataset",
 ])
 
 with tab1:
-    t1_df = total_trend_df.copy()
-    t1_df['PoP_Change'] = t1_df['Total'].diff().fillna(0).astype(int)
-    t1_df['PoP_%']      = (t1_df['Total'].pct_change() * 100).round(1).fillna(0)
-    st.dataframe(t1_df, use_container_width=True)
-    st.download_button("⬇️ Download", t1_df.to_csv(index=False), "period_totals.csv")
+    st.info(f"Showing **{len(dr_total_trend_df)}** periods matching selected filters")
+    st.dataframe(dr_total_trend_df, use_container_width=True)
+    st.download_button("⬇️ Download", dr_total_trend_df.to_csv(index=False), "period_totals.csv")
 
 with tab2:
-    u_df = trend_df.copy()
-    u_df['MoM_Change'] = u_df['Unique_Agency_IDs'].diff().fillna(0).astype(int)
-    st.dataframe(u_df, use_container_width=True)
-    st.download_button("⬇️ Download", u_df.to_csv(index=False), "unique_agencies_per_period.csv")
-    st.markdown(f"**Active in {latest_label}**")
-    active = df_latest.groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
-    active = active[active[count_col] >= 1].sort_values(count_col, ascending=False)
-    st.dataframe(active, height=350, use_container_width=True)
-    st.download_button("⬇️ Download Active", active.to_csv(index=False), "active_agencies.csv")
-    st.markdown(f"**Inactive in {latest_label}** (count = 0)")
-    inactive = df_latest.groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
-    inactive = inactive[inactive[count_col] <= 0]
-    st.dataframe(inactive, height=300, use_container_width=True)
-    st.download_button("⬇️ Download Inactive", inactive.to_csv(index=False), "inactive_agencies.csv")
+    st.info(f"Showing **{len(dr_unique_df)}** periods matching selected filters")
+    st.dataframe(dr_unique_df, use_container_width=True)
+    st.download_button("⬇️ Download", dr_unique_df.to_csv(index=False), "unique_agencies_per_period.csv")
+
+    if dr_periods:
+        last_m, last_y = dr_periods[-1]
+        last_label_local = f"{last_m} {last_y}"
+        st.markdown(f"**Active in {last_label_local}**")
+        active_local = get_period_df(last_m, last_y).groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
+        active_local = active_local[active_local[count_col] >= 1].sort_values(count_col, ascending=False)
+        st.dataframe(active_local, height=350, use_container_width=True)
+        st.download_button("⬇️ Download Active", active_local.to_csv(index=False), "active_agencies.csv")
+        st.markdown(f"**Inactive in {last_label_local}** (count = 0)")
+        inactive_local = get_period_df(last_m, last_y).groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
+        inactive_local = inactive_local[inactive_local[count_col] <= 0]
+        st.dataframe(inactive_local, height=300, use_container_width=True)
+        st.download_button("⬇️ Download Inactive", inactive_local.to_csv(index=False), "inactive_agencies.csv")
 
 with tab3:
-    t3_df = agg_merged_kpi.copy()
-    t3_df.columns = [agency_id_col, agency_name_col,
-                     f'Count_{latest_label}', f'Count_{prev_label}', 'Net_Change', 'Pct_Change_%']
-    t3_df = t3_df.sort_values('Net_Change', key=abs, ascending=False)
-    st.dataframe(t3_df, height=400, use_container_width=True)
-    st.download_button("⬇️ Download", t3_df.to_csv(index=False), "agency_changes.csv")
+    # Filter agg_merged_kpi is based on latest vs prev — also re-derive for filtered periods if needed
+    if prev_label in dr_period_labels and latest_label in dr_period_labels:
+        t3_df = agg_merged_kpi.copy()
+        t3_df.columns = [agency_id_col, agency_name_col,
+                         f'Count_{latest_label}', f'Count_{prev_label}', 'Net_Change', 'Pct_Change_%']
+        t3_df = t3_df.sort_values('Net_Change', key=abs, ascending=False)
+        st.info(f"Comparing **{latest_label}** vs **{prev_label}**")
+        st.dataframe(t3_df, height=400, use_container_width=True)
+        st.download_button("⬇️ Download", t3_df.to_csv(index=False), "agency_changes.csv")
+    else:
+        # Build comparison from first and last period in filtered set
+        if len(dr_periods) >= 2:
+            p1_m, p1_y = dr_periods[0]
+            p2_m, p2_y = dr_periods[-1]
+            agg_p1 = get_period_df(p1_m, p1_y).groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
+            agg_p2 = get_period_df(p2_m, p2_y).groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
+            agg_p1.columns = [agency_id_col, agency_name_col, f'Count_{p1_m} {p1_y}']
+            agg_p2.columns = [agency_id_col, agency_name_col, f'Count_{p2_m} {p2_y}']
+            merged_t3 = pd.merge(agg_p2, agg_p1, on=[agency_id_col, agency_name_col], how='outer').fillna(0)
+            merged_t3['Net_Change'] = (merged_t3[f'Count_{p2_m} {p2_y}'] - merged_t3[f'Count_{p1_m} {p1_y}']).astype(int)
+            merged_t3['Pct_Change_%'] = np.where(
+                merged_t3[f'Count_{p1_m} {p1_y}'] > 0,
+                (merged_t3['Net_Change'] / merged_t3[f'Count_{p1_m} {p1_y}'] * 100).round(1),
+                np.nan
+            )
+            merged_t3 = merged_t3.sort_values('Net_Change', key=abs, ascending=False)
+            st.info(f"Comparing **{p2_m} {p2_y}** vs **{p1_m} {p1_y}** (first & last in filter)")
+            st.dataframe(merged_t3, height=400, use_container_width=True)
+            st.download_button("⬇️ Download", merged_t3.to_csv(index=False), "agency_changes.csv")
+        else:
+            st.warning("Need at least 2 periods in the filtered set for comparison.")
 
 with tab4:
     cert_all = []
-    for m, y in periods_list:
+    for m, y in dr_periods:
         s = cert_sum_for_period(m, y).reset_index()
         s.columns = [cert_type_col, f"{m} {y}"]
         cert_all.append(s)
@@ -760,16 +942,21 @@ with tab4:
         for c in cert_pivot.columns:
             if c != cert_type_col:
                 cert_pivot[c] = cert_pivot[c].astype(int)
-        if latest_label in cert_pivot.columns:
-            cert_pivot = cert_pivot.sort_values(latest_label, ascending=False)
+
+        # Sort by last available period
+        last_p_label = f"{dr_periods[-1][0]} {dr_periods[-1][1]}"
+        if last_p_label in cert_pivot.columns:
+            cert_pivot = cert_pivot.sort_values(last_p_label, ascending=False)
+
         t4_grp = st.selectbox("View level", ["Monthly (all periods)", "Quarterly", "Half-Yearly", "Yearly"], key="t4g")
         if t4_grp == "Monthly (all periods)":
+            st.info(f"Showing {len(dr_periods)} filtered period(s)")
             st.dataframe(cert_pivot, use_container_width=True)
             st.download_button("⬇️ Download", cert_pivot.to_csv(index=False), "cert_monthly.csv")
         else:
             g_mode = t4_grp.split(" ")[0]
             rows_agg = []
-            for m, y in periods_list:
+            for m, y in dr_periods:
                 glabel = (f"{y} {get_quarter(m)}" if g_mode == "Quarterly"
                           else (f"{y} {get_half(m)}" if g_mode == "Half-Yearly" else str(y)))
                 for ct, val in cert_sum_for_period(m, y).items():
@@ -784,92 +971,114 @@ with tab4:
                 agg_wide.columns.name = None
                 st.dataframe(agg_wide, use_container_width=True)
                 st.download_button("⬇️ Download", agg_wide.to_csv(index=False), f"cert_{t4_grp.lower().replace(' ','-')}.csv")
+    else:
+        st.warning("No certification data for selected filters.")
 
-# Shared pivot for tabs 5 & 6
-agg_base = df.groupby([agency_id_col, agency_name_col, cert_type_col, '_month_canon', year_col])[count_col].sum().reset_index()
-agg_base['_period'] = agg_base['_month_canon'] + ' ' + agg_base[year_col]
-pivot_compare = agg_base.pivot_table(
-    index=[agency_id_col, agency_name_col, cert_type_col],
-    columns='_period', values=count_col, fill_value=0,
-).reset_index()
-pivot_compare.columns.name = None
+# Shared pivot for tabs 5 & 6 — using dr_periods
+agg_base_dr = df.copy()
+# Filter to dr_periods
+dr_mask = pd.Series([False] * len(agg_base_dr), index=agg_base_dr.index)
+for m, y in dr_periods:
+    dr_mask |= ((agg_base_dr['_month_canon'] == m) & (agg_base_dr[year_col] == y))
+agg_base_dr = agg_base_dr[dr_mask]
 
-cols_needed = [c for c in [prev_label, latest_label] if c in pivot_compare.columns]
-agg_cert_merged = pivot_compare[[agency_id_col, agency_name_col, cert_type_col] + cols_needed].copy()
-if prev_label in agg_cert_merged.columns and latest_label in agg_cert_merged.columns:
-    agg_cert_merged['Net_Change']  = agg_cert_merged[latest_label] - agg_cert_merged[prev_label]
-    agg_cert_merged['Pct_Change_%'] = np.where(
-        agg_cert_merged[prev_label] > 0,
-        (agg_cert_merged['Net_Change'] / agg_cert_merged[prev_label] * 100).round(2),
-        np.nan,
-    )
-    col_map = {
-        agency_id_col: agency_id_col, agency_name_col: agency_name_col, cert_type_col: cert_type_col,
-        latest_label: f'Count_{latest_label}', prev_label: f'Count_{prev_label}',
-    }
+if not agg_base_dr.empty and len(dr_periods) >= 2:
+    agg_base_dr2 = agg_base_dr.groupby([agency_id_col, agency_name_col, cert_type_col, '_month_canon', year_col])[count_col].sum().reset_index()
+    agg_base_dr2['_period'] = agg_base_dr2['_month_canon'] + ' ' + agg_base_dr2[year_col]
+    pivot_compare_dr = agg_base_dr2.pivot_table(
+        index=[agency_id_col, agency_name_col, cert_type_col],
+        columns='_period', values=count_col, fill_value=0,
+    ).reset_index()
+    pivot_compare_dr.columns.name = None
+
+    first_p_label = f"{dr_periods[0][0]} {dr_periods[0][1]}"
+    last_p_label2 = f"{dr_periods[-1][0]} {dr_periods[-1][1]}"
+    cols_needed_dr = [c for c in [first_p_label, last_p_label2] if c in pivot_compare_dr.columns]
+    agg_cert_merged_dr = pivot_compare_dr[[agency_id_col, agency_name_col, cert_type_col] + cols_needed_dr].copy()
+
+    if len(cols_needed_dr) == 2:
+        agg_cert_merged_dr['Net_Change']   = agg_cert_merged_dr[last_p_label2] - agg_cert_merged_dr[first_p_label]
+        agg_cert_merged_dr['Pct_Change_%'] = np.where(
+            agg_cert_merged_dr[first_p_label] > 0,
+            (agg_cert_merged_dr['Net_Change'] / agg_cert_merged_dr[first_p_label] * 100).round(2),
+            np.nan,
+        )
+    else:
+        agg_cert_merged_dr['Net_Change']   = 0
+        agg_cert_merged_dr['Pct_Change_%'] = np.nan
+
+    with tab5:
+        st.info(f"Top 20 gainers | Comparing **{first_p_label}** → **{last_p_label2}**")
+        tg = agg_cert_merged_dr.nlargest(20, 'Net_Change').copy()
+        # Remove agency_id_col from display
+        tg_display = tg.drop(columns=[agency_id_col], errors='ignore')
+        st.dataframe(tg_display, use_container_width=True)
+        st.download_button("⬇️ Download", tg_display.to_csv(index=False), "top_gainers.csv")
+
+    with tab6:
+        st.info(f"Top 20 losers | Comparing **{first_p_label}** → **{last_p_label2}**")
+        tl = agg_cert_merged_dr.nsmallest(20, 'Net_Change').copy()
+        tl_display = tl.drop(columns=[agency_id_col], errors='ignore')
+        st.dataframe(tl_display, use_container_width=True)
+        st.download_button("⬇️ Download", tl_display.to_csv(index=False), "top_losers.csv")
 else:
-    agg_cert_merged['Net_Change'] = 0
-    agg_cert_merged['Pct_Change_%'] = np.nan
-
-with tab5:
-    tg = agg_cert_merged.nlargest(20, 'Net_Change').copy()
-    st.dataframe(tg, use_container_width=True)
-    st.download_button("⬇️ Download", tg.to_csv(index=False), "top_gainers.csv")
-
-with tab6:
-    tl = agg_cert_merged.nsmallest(20, 'Net_Change').copy()
-    st.dataframe(tl, use_container_width=True)
-    st.download_button("⬇️ Download", tl.to_csv(index=False), "top_losers.csv")
+    with tab5:
+        st.warning("Need at least 2 filtered periods for gainers/losers comparison.")
+    with tab6:
+        st.warning("Need at least 2 filtered periods for gainers/losers comparison.")
 
 with tab7:
-    st.caption("Full dataset — one row per agency + cert type, all periods side-by-side with PoP change columns.")
-    pivot_base = df.groupby([agency_id_col, agency_name_col, cert_type_col, '_month_canon', year_col])[count_col].sum().reset_index()
-    pivot_base['_period'] = pivot_base['_month_canon'] + ' ' + pivot_base[year_col]
-    agency_pivot = pivot_base.pivot_table(
-        index=[agency_id_col, agency_name_col, cert_type_col],
-        columns='_period', values=count_col, aggfunc='sum', fill_value=0,
-    ).reset_index()
-    agency_pivot.columns.name = None
+    st.caption("Full dataset — one row per agency + cert type, all FILTERED periods side-by-side with PoP change columns.")
 
-    period_cols_present = [p for p in period_labels if p in agency_pivot.columns]
-    agency_pivot = agency_pivot[[agency_id_col, agency_name_col, cert_type_col] + period_cols_present]
+    if not agg_base_dr.empty:
+        pivot_base_dr = agg_base_dr.groupby([agency_id_col, agency_name_col, cert_type_col, '_month_canon', year_col])[count_col].sum().reset_index()
+        pivot_base_dr['_period'] = pivot_base_dr['_month_canon'] + ' ' + pivot_base_dr[year_col]
+        agency_pivot_dr = pivot_base_dr.pivot_table(
+            index=[agency_id_col, agency_name_col, cert_type_col],
+            columns='_period', values=count_col, aggfunc='sum', fill_value=0,
+        ).reset_index()
+        agency_pivot_dr.columns.name = None
 
-    def short_label(ps):
-        parts = ps.split(" ", 1)
-        return f"{parts[0][:3]}-{parts[1]}" if len(parts) > 1 else ps
+        period_cols_present_dr = [p for p in dr_period_labels if p in agency_pivot_dr.columns]
+        agency_pivot_dr = agency_pivot_dr[[agency_id_col, agency_name_col, cert_type_col] + period_cols_present_dr]
 
-    final_cols_data = {
-        agency_id_col: agency_pivot[agency_id_col],
-        agency_name_col: agency_pivot[agency_name_col],
-        cert_type_col: agency_pivot[cert_type_col],
-    }
-    for i, p in enumerate(period_cols_present):
-        final_cols_data[p] = agency_pivot[p].astype(int)
-        if i > 0:
-            pp  = period_cols_present[i - 1]
-            net = agency_pivot[p].astype(int) - agency_pivot[pp].astype(int)
-            pct = np.where(agency_pivot[pp] > 0, (net / agency_pivot[pp] * 100).round(2), np.nan)
-            final_cols_data[f"{short_label(p)} Chg"]  = net
-            final_cols_data[f"{short_label(p)} Chg%"] = pd.Series(pct).map(
-                lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
-            )
+        def short_label(ps):
+            parts = ps.split(" ", 1)
+            return f"{parts[0][:3]}-{parts[1]}" if len(parts) > 1 else ps
 
-    full_display = pd.DataFrame(final_cols_data).reset_index(drop=True)
-    if len(period_cols_present) >= 2:
-        lcc = f"{short_label(period_cols_present[-1])} Chg"
-        if lcc in full_display.columns:
-            full_display = full_display.sort_values(lcc, key=abs, ascending=False)
+        final_cols_data = {
+            agency_id_col: agency_pivot_dr[agency_id_col],
+            agency_name_col: agency_pivot_dr[agency_name_col],
+            cert_type_col: agency_pivot_dr[cert_type_col],
+        }
+        for i, p in enumerate(period_cols_present_dr):
+            final_cols_data[p] = agency_pivot_dr[p].astype(int)
+            if i > 0:
+                pp  = period_cols_present_dr[i - 1]
+                net = agency_pivot_dr[p].astype(int) - agency_pivot_dr[pp].astype(int)
+                pct = np.where(agency_pivot_dr[pp] > 0, (net / agency_pivot_dr[pp] * 100).round(2), np.nan)
+                final_cols_data[f"{short_label(p)} Chg"]  = net
+                final_cols_data[f"{short_label(p)} Chg%"] = pd.Series(pct).map(
+                    lambda x: f"{x:+.2f}%" if pd.notna(x) else "—"
+                )
 
-    # Filters
-    f1, f2 = st.columns(2)
-    with f1:
-        fa = st.multiselect("Filter Agency", sorted(full_display[agency_name_col].unique()), key="t7_ag")
-    with f2:
-        fc = st.multiselect("Filter Cert Type", sorted(full_display[cert_type_col].unique()), key="t7_ct")
-    disp = full_display.copy()
-    if fa: disp = disp[disp[agency_name_col].isin(fa)]
-    if fc: disp = disp[disp[cert_type_col].isin(fc)]
+        full_display_dr = pd.DataFrame(final_cols_data).reset_index(drop=True)
+        if len(period_cols_present_dr) >= 2:
+            lcc = f"{short_label(period_cols_present_dr[-1])} Chg"
+            if lcc in full_display_dr.columns:
+                full_display_dr = full_display_dr.sort_values(lcc, key=abs, ascending=False)
 
-    st.info(f"📊 **{len(disp):,} rows** | **{disp[agency_name_col].nunique():,} agencies** | **{disp[cert_type_col].nunique():,} cert types**")
-    st.dataframe(disp, height=480, use_container_width=True)
-    st.download_button("⬇️ Download Full Data", disp.to_csv(index=False), "full_data.csv")
+        f1, f2 = st.columns(2)
+        with f1:
+            fa = st.multiselect("Filter Agency", sorted(full_display_dr[agency_name_col].unique()), key="t7_ag")
+        with f2:
+            fc = st.multiselect("Filter Cert Type", sorted(full_display_dr[cert_type_col].unique()), key="t7_ct")
+        disp = full_display_dr.copy()
+        if fa: disp = disp[disp[agency_name_col].isin(fa)]
+        if fc: disp = disp[disp[cert_type_col].isin(fc)]
+
+        st.info(f"📊 **{len(disp):,} rows** | **{disp[agency_name_col].nunique():,} agencies** | **{disp[cert_type_col].nunique():,} cert types** | **{len(period_cols_present_dr)} periods**")
+        st.dataframe(disp, height=480, use_container_width=True)
+        st.download_button("⬇️ Download Full Data", disp.to_csv(index=False), "full_data.csv")
+    else:
+        st.warning("No data for selected filters.")
