@@ -102,25 +102,13 @@ hr { border-color: #dce3ee; margin: 1.2rem 0; }
     font-weight: 600; font-size: 12px;
 }
 .stDownloadButton > button:hover { background-color: #c9a84c !important; color: #1a2340 !important; }
-/* VINAY ADDED*/
-/* Change multiselect selected values (Year / Month / Quarter chips) */
 [data-baseweb="tag"] {
-    background-color: #66BB6A33 !important;   /* light green transparent background */
-    color: #2E7D32 !important;                /* darker green text */
-    border: 1px solid #66BB6A !important;     /* green border */
+    background-color: #66BB6A33 !important;
+    color: #2E7D32 !important;
+    border: 1px solid #66BB6A !important;
 }
-
-/* Change close (X) icon color inside chips */
-[data-baseweb="tag"] svg {
-    fill: #2E7D32 !important;
-}
-
-/* Hover effect */
-[data-baseweb="tag"]:hover {
-    background-color: #66BB6A66 !important;
-}
-
-/* ── Main content: force all widget labels and radio text to dark ── */
+[data-baseweb="tag"] svg { fill: #2E7D32 !important; }
+[data-baseweb="tag"]:hover { background-color: #66BB6A66 !important; }
 .main label { color: #1a2340 !important; }
 .main p { color: #1a2340 !important; }
 .main span { color: #1a2340 !important; }
@@ -131,10 +119,8 @@ hr { border-color: #dce3ee; margin: 1.2rem 0; }
 .main [role="radiogroup"] span { color: #1a2340 !important; }
 .main [data-testid="stWidgetLabel"] p { color: #1a2340 !important; }
 .main [data-testid="stWidgetLabel"] span { color: #1a2340 !important; }
-/* Keep alert/info boxes using their own colours */
 .main [data-testid="stAlert"] p { color: inherit !important; }
 .main [data-testid="stAlert"] span { color: inherit !important; }
-/* Keep chart/dataframe text unaffected */
 .main .js-plotly-plot text { color: unset !important; }
 </style>
 """, unsafe_allow_html=True)
@@ -279,6 +265,19 @@ with st.sidebar:
     )
     df_raw = None
 
+    # ── Read Streamlit secrets (safe — no crash if missing) ────────────────
+    secrets_mysql = {}
+    secrets_sf    = {}
+    try:
+        secrets_mysql = dict(st.secrets.get("mysql",     {}))
+    except Exception:
+        pass
+    try:
+        secrets_sf    = dict(st.secrets.get("snowflake", {}))
+    except Exception:
+        pass
+
+    # ── Upload File ────────────────────────────────────────────────────────
     if src == "Upload File (CSV / Excel)":
         uploaded = st.file_uploader(
             "📁 Drop or browse file",
@@ -288,24 +287,44 @@ with st.sidebar:
         if uploaded:
             df_raw = load_file(uploaded)
             if df_raw is not None:
-                st.session_state.df_raw         = df_raw
-                st.session_state.source_label   = uploaded.name
+                st.session_state.df_raw       = df_raw
+                st.session_state.source_label = uploaded.name
                 st.success(f"✅ Loaded {len(df_raw):,} rows")
 
+    # ── MySQL ──────────────────────────────────────────────────────────────
     elif src == "MySQL":
+        # Show a notice if secrets are detected
+        if secrets_mysql.get("host"):
+            st.info("🔑 Credentials pre-filled from Streamlit Secrets", icon="ℹ️")
+
         with st.expander("🔐 MySQL Credentials", expanded=True):
-            my_host     = st.text_input("Host",     value="localhost",         key="my_host")
-            my_port     = st.text_input("Port",     value="3306",              key="my_port")
-            my_user     = st.text_input("User",     value="root",              key="my_user")
-            my_pass     = st.text_input("Password", value="",  type="password",key="my_pass")
-            my_db       = st.text_input("Database", value="",                  key="my_db")
-            my_query    = st.text_area(
+            my_host  = st.text_input("Host",     value=secrets_mysql.get("host",     "localhost"), key="my_host")
+            my_port  = st.text_input("Port",     value=str(secrets_mysql.get("port", "3306")),     key="my_port")
+            my_user  = st.text_input("User",     value=secrets_mysql.get("user",     "root"),      key="my_user")
+            my_pass  = st.text_input("Password", value=secrets_mysql.get("password", ""),
+                                     type="password", key="my_pass")
+            my_db    = st.text_input("Database", value=secrets_mysql.get("database", ""),          key="my_db")
+            my_query = st.text_area(
                 "SQL Query",
                 value="SELECT * FROM your_table LIMIT 50000",
-                height=90,
-                key="my_query",
+                height=90, key="my_query",
             )
-        if st.button("🔄 Connect & Load", use_container_width=True):
+
+        # Auto-connect on first load if secrets are fully configured
+        auto_connect = all([
+            secrets_mysql.get("host"),
+            secrets_mysql.get("user"),
+            secrets_mysql.get("database"),
+        ])
+        if auto_connect and "df_raw" not in st.session_state:
+            with st.spinner("🔄 Auto-connecting via Streamlit Secrets…"):
+                df_raw = load_mysql(my_host, my_port, my_user, my_pass, my_db, my_query)
+            if df_raw is not None:
+                st.session_state.df_raw       = df_raw
+                st.session_state.source_label = f"MySQL: {my_db}"
+                st.success(f"✅ {len(df_raw):,} rows loaded")
+
+        if st.button("🔄 Connect & Load", use_container_width=True, key="mysql_btn"):
             with st.spinner("Connecting to MySQL…"):
                 df_raw = load_mysql(my_host, my_port, my_user, my_pass, my_db, my_query)
             if df_raw is not None:
@@ -313,21 +332,39 @@ with st.sidebar:
                 st.session_state.source_label = f"MySQL: {my_db}"
                 st.success(f"✅ {len(df_raw):,} rows loaded")
 
+    # ── Snowflake ──────────────────────────────────────────────────────────
     elif src == "Snowflake":
+        if secrets_sf.get("account"):
+            st.info("🔑 Credentials pre-filled from Streamlit Secrets", icon="ℹ️")
+
         with st.expander("🔐 Snowflake Credentials", expanded=True):
-            sf_account  = st.text_input("Account",   value="yourorg-youracccount", key="sf_acc")
-            sf_user     = st.text_input("User",       value="",                    key="sf_user")
-            sf_pass     = st.text_input("Password",   value="", type="password",   key="sf_pass")
-            sf_wh       = st.text_input("Warehouse",  value="COMPUTE_WH",          key="sf_wh")
-            sf_db       = st.text_input("Database",   value="",                    key="sf_db")
-            sf_schema   = st.text_input("Schema",     value="PUBLIC",              key="sf_schema")
-            sf_query    = st.text_area(
+            sf_account = st.text_input("Account",  value=secrets_sf.get("account",   "yourorg-youraccount"), key="sf_acc")
+            sf_user    = st.text_input("User",      value=secrets_sf.get("user",      ""),                   key="sf_user")
+            sf_pass    = st.text_input("Password",  value=secrets_sf.get("password",  ""), type="password",  key="sf_pass")
+            sf_wh      = st.text_input("Warehouse", value=secrets_sf.get("warehouse", "COMPUTE_WH"),         key="sf_wh")
+            sf_db      = st.text_input("Database",  value=secrets_sf.get("database",  ""),                   key="sf_db")
+            sf_schema  = st.text_input("Schema",    value=secrets_sf.get("schema",    "PUBLIC"),             key="sf_schema")
+            sf_query   = st.text_area(
                 "SQL Query",
                 value="SELECT * FROM your_table LIMIT 50000",
-                height=90,
-                key="sf_query",
+                height=90, key="sf_query",
             )
-        if st.button("🔄 Connect & Load", use_container_width=True):
+
+        # Auto-connect on first load if secrets are fully configured
+        auto_connect_sf = all([
+            secrets_sf.get("account"),
+            secrets_sf.get("user"),
+            secrets_sf.get("database"),
+        ])
+        if auto_connect_sf and "df_raw" not in st.session_state:
+            with st.spinner("🔄 Auto-connecting to Snowflake via Secrets…"):
+                df_raw = load_snowflake(sf_account, sf_user, sf_pass, sf_wh, sf_db, sf_schema, sf_query)
+            if df_raw is not None:
+                st.session_state.df_raw       = df_raw
+                st.session_state.source_label = f"Snowflake: {sf_db}.{sf_schema}"
+                st.success(f"✅ {len(df_raw):,} rows loaded")
+
+        if st.button("🔄 Connect & Load", use_container_width=True, key="sf_btn"):
             with st.spinner("Connecting to Snowflake…"):
                 df_raw = load_snowflake(sf_account, sf_user, sf_pass, sf_wh, sf_db, sf_schema, sf_query)
             if df_raw is not None:
@@ -405,10 +442,9 @@ period_labels = [f"{m} {y}" for m, y in periods_list]
 if not period_labels:
     st.error("No valid month periods found. Check your Month and Year column mapping."); st.stop()
 
-# Derive unique years, quarters, months from periods_list
-all_years     = sorted(set(y for _, y in periods_list))
-all_quarters  = sorted(set(get_quarter_short(m) for m, _ in periods_list))
-all_months_available = sorted(set(m for m, _ in periods_list), key=lambda x: MONTH_FULL.index(x))
+all_years                = sorted(set(y for _, y in periods_list))
+all_quarters             = sorted(set(get_quarter_short(m) for m, _ in periods_list))
+all_months_available     = sorted(set(m for m, _ in periods_list), key=lambda x: MONTH_FULL.index(x))
 
 # ── Period Selection ──────────────────────────────────────────────────────────
 with st.sidebar:
@@ -443,12 +479,9 @@ def cert_sum_for_period(month_name, year):
 def filter_periods(periods, sel_years=None, sel_months=None, sel_quarters=None):
     result = []
     for m, y in periods:
-        if sel_years and y not in sel_years:
-            continue
-        if sel_months and m not in sel_months:
-            continue
-        if sel_quarters and get_quarter_short(m) not in sel_quarters:
-            continue
+        if sel_years and y not in sel_years:       continue
+        if sel_months and m not in sel_months:     continue
+        if sel_quarters and get_quarter_short(m) not in sel_quarters: continue
         result.append((m, y))
     return result
 
@@ -468,8 +501,8 @@ agg_merged_kpi['Pct_Change'] = np.where(
     np.nan,
 )
 
-df_compare_all    = pd.concat([get_period_df(p.split(" ",1)[0], p.split(" ",1)[1]) for p in selected_compare_labels])
-agg_compare_all   = df_compare_all.groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
+df_compare_all  = pd.concat([get_period_df(p.split(" ",1)[0], p.split(" ",1)[1]) for p in selected_compare_labels])
+agg_compare_all = df_compare_all.groupby([agency_id_col, agency_name_col])[count_col].sum().reset_index()
 agg_compare_all.columns = [agency_id_col, agency_name_col, 'count_compare']
 
 latest_total  = int(agg_latest['count_latest'].sum())
@@ -544,10 +577,10 @@ grouping_mode = st.radio(
 )
 
 def _bucket_label(m, y, mode):
-    if mode == "Monthly":      return f"{m[:3]} {y}"
-    if mode == "Quarterly":    return f"{y} {get_quarter(m)}"
-    if mode == "Half-Yearly":  return f"{y} {get_half(m)}"
-    if mode == "Yearly":       return str(y)
+    if mode == "Monthly":     return f"{m[:3]} {y}"
+    if mode == "Quarterly":   return f"{y} {get_quarter(m)}"
+    if mode == "Half-Yearly": return f"{y} {get_half(m)}"
+    if mode == "Yearly":      return str(y)
     return f"{m} {y}"
 
 def build_pivot_side_by_side(mode, included_labels=None):
@@ -662,24 +695,17 @@ else:
 st.markdown("---")
 
 # =============================================================================
-#  UNIQUE AGENCY'S TREND  (renamed + with filters)
+#  UNIQUE AGENCY'S TREND
 # =============================================================================
 st.markdown('<div class="section-header">🏢 Unique Agency\'s per Period</div>', unsafe_allow_html=True)
 
-# ── Filters for Unique Agencies chart ────────────────────────────────────────
 ua_f1, ua_f2, ua_f3 = st.columns(3)
 with ua_f1:
-    ua_year_filter = st.multiselect(
-        "📅 Year", all_years, default=all_years, key="ua_year"
-    )
+    ua_year_filter = st.multiselect("📅 Year", all_years, default=all_years, key="ua_year")
 with ua_f2:
-    ua_month_filter = st.multiselect(
-        "🗓️ Month", all_months_available, default=all_months_available, key="ua_month"
-    )
+    ua_month_filter = st.multiselect("🗓️ Month", all_months_available, default=all_months_available, key="ua_month")
 with ua_f3:
-    ua_quarter_filter = st.multiselect(
-        "📊 Quarter", all_quarters, default=all_quarters, key="ua_quarter"
-    )
+    ua_quarter_filter = st.multiselect("📊 Quarter", all_quarters, default=all_quarters, key="ua_quarter")
 
 ua_periods = filter_periods(
     periods_list,
@@ -727,26 +753,19 @@ else:
 st.markdown("---")
 
 # =============================================================================
-#  MONTHLY TOTALS + TOP MOVERS  (with filters on totals chart)
+#  MONTHLY TOTALS + TOP MOVERS
 # =============================================================================
 col1, col2 = st.columns([3, 2])
 with col1:
     st.markdown('<div class="section-header">📈 Total Certifications per Period</div>', unsafe_allow_html=True)
 
-    # ── Filters for Total Certifications chart ────────────────────────────────
     tc_f1, tc_f2, tc_f3 = st.columns(3)
     with tc_f1:
-        tc_year_filter = st.multiselect(
-            "📅 Year", all_years, default=all_years, key="tc_year"
-        )
+        tc_year_filter = st.multiselect("📅 Year", all_years, default=all_years, key="tc_year")
     with tc_f2:
-        tc_month_filter = st.multiselect(
-            "🗓️ Month", all_months_available, default=all_months_available, key="tc_month"
-        )
+        tc_month_filter = st.multiselect("🗓️ Month", all_months_available, default=all_months_available, key="tc_month")
     with tc_f3:
-        tc_quarter_filter = st.multiselect(
-            "📊 Quarter", all_quarters, default=all_quarters, key="tc_quarter"
-        )
+        tc_quarter_filter = st.multiselect("📊 Quarter", all_quarters, default=all_quarters, key="tc_quarter")
 
     tc_periods = filter_periods(
         periods_list,
@@ -794,7 +813,6 @@ with col1:
 with col2:
     st.markdown('<div class="section-header">🔥 Top Agency Movers</div>', unsafe_allow_html=True)
 
-    # ── Agency movers WITHOUT Agency ID ──────────────────────────────────────
     def _build_movers(subset, increasing=True):
         d = subset[[agency_name_col, 'Net_Change', 'Pct_Change']].copy()
         d.columns = ['Agency Name', 'Net Δ', '% Δ']
@@ -814,11 +832,10 @@ with col2:
 st.markdown("---")
 
 # =============================================================================
-#  DATA REPORT TABS  (with Year / Month / Quarter / Half-Yearly filters)
+#  DATA REPORT TABS
 # =============================================================================
 st.markdown('<div class="section-header">📋 Data Reports</div>', unsafe_allow_html=True)
 
-# ── Shared filters for ALL Data Report tabs ───────────────────────────────────
 st.markdown("**🔎 Data Report Filters**")
 dr_f1, dr_f2, dr_f3, dr_f4 = st.columns(4)
 with dr_f1:
@@ -831,13 +848,12 @@ with dr_f4:
     dr_half_opts = sorted(set(get_half_short(m) for m, _ in periods_list))
     dr_half = st.multiselect("📆 Half-Year", dr_half_opts, default=dr_half_opts, key="dr_half")
 
-# Build filtered periods for data reports
 dr_periods = []
 for m, y in periods_list:
-    if dr_year and y not in dr_year: continue
-    if dr_month and m not in dr_month: continue
-    if dr_quarter and get_quarter_short(m) not in dr_quarter: continue
-    if dr_half and get_half_short(m) not in dr_half: continue
+    if dr_year    and y not in dr_year:                        continue
+    if dr_month   and m not in dr_month:                       continue
+    if dr_quarter and get_quarter_short(m) not in dr_quarter:  continue
+    if dr_half    and get_half_short(m) not in dr_half:        continue
     dr_periods.append((m, y))
 
 dr_period_labels = [f"{m} {y}" for m, y in dr_periods]
@@ -846,10 +862,8 @@ if not dr_periods:
     st.warning("⚠️ No periods match the selected filters. Adjust filters above.")
     st.stop()
 
-# Build period totals for filtered periods
 dr_total_trend = [
-    {'Period': f"{m} {y}",
-     'Total': int(get_period_df(m, y)[count_col].sum())}
+    {'Period': f"{m} {y}", 'Total': int(get_period_df(m, y)[count_col].sum())}
     for m, y in dr_periods
 ]
 dr_total_trend_df = pd.DataFrame(dr_total_trend)
@@ -860,7 +874,6 @@ else:
     dr_total_trend_df['PoP_Change'] = 0
     dr_total_trend_df['PoP_%']      = 0.0
 
-# Build unique agencies per filtered period
 dr_trend_rows = []
 for m, y in dr_periods:
     agg = get_period_df(m, y).groupby(agency_id_col)[count_col].sum()
@@ -899,7 +912,6 @@ with tab2:
         st.download_button("⬇️ Download Inactive", inactive_local.to_csv(index=False), "inactive_agencies.csv")
 
 with tab3:
-    # Filter agg_merged_kpi is based on latest vs prev — also re-derive for filtered periods if needed
     if prev_label in dr_period_labels and latest_label in dr_period_labels:
         t3_df = agg_merged_kpi.copy()
         t3_df.columns = [agency_id_col, agency_name_col,
@@ -909,7 +921,6 @@ with tab3:
         st.dataframe(t3_df, height=400, use_container_width=True)
         st.download_button("⬇️ Download", t3_df.to_csv(index=False), "agency_changes.csv")
     else:
-        # Build comparison from first and last period in filtered set
         if len(dr_periods) >= 2:
             p1_m, p1_y = dr_periods[0]
             p2_m, p2_y = dr_periods[-1]
@@ -922,7 +933,7 @@ with tab3:
             merged_t3['Pct_Change_%'] = np.where(
                 merged_t3[f'Count_{p1_m} {p1_y}'] > 0,
                 (merged_t3['Net_Change'] / merged_t3[f'Count_{p1_m} {p1_y}'] * 100).round(1),
-                np.nan
+                np.nan,
             )
             merged_t3 = merged_t3.sort_values('Net_Change', key=abs, ascending=False)
             st.info(f"Comparing **{p2_m} {p2_y}** vs **{p1_m} {p1_y}** (first & last in filter)")
@@ -943,7 +954,6 @@ with tab4:
             if c != cert_type_col:
                 cert_pivot[c] = cert_pivot[c].astype(int)
 
-        # Sort by last available period
         last_p_label = f"{dr_periods[-1][0]} {dr_periods[-1][1]}"
         if last_p_label in cert_pivot.columns:
             cert_pivot = cert_pivot.sort_values(last_p_label, ascending=False)
@@ -974,9 +984,8 @@ with tab4:
     else:
         st.warning("No certification data for selected filters.")
 
-# Shared pivot for tabs 5 & 6 — using dr_periods
+# Shared pivot for tabs 5 & 6
 agg_base_dr = df.copy()
-# Filter to dr_periods
 dr_mask = pd.Series([False] * len(agg_base_dr), index=agg_base_dr.index)
 for m, y in dr_periods:
     dr_mask |= ((agg_base_dr['_month_canon'] == m) & (agg_base_dr[year_col] == y))
@@ -1010,7 +1019,6 @@ if not agg_base_dr.empty and len(dr_periods) >= 2:
     with tab5:
         st.info(f"Top 20 gainers | Comparing **{first_p_label}** → **{last_p_label2}**")
         tg = agg_cert_merged_dr.nlargest(20, 'Net_Change').copy()
-        # Remove agency_id_col from display
         tg_display = tg.drop(columns=[agency_id_col], errors='ignore')
         st.dataframe(tg_display, use_container_width=True)
         st.download_button("⬇️ Download", tg_display.to_csv(index=False), "top_gainers.csv")
@@ -1047,9 +1055,9 @@ with tab7:
             return f"{parts[0][:3]}-{parts[1]}" if len(parts) > 1 else ps
 
         final_cols_data = {
-            agency_id_col: agency_pivot_dr[agency_id_col],
+            agency_id_col:   agency_pivot_dr[agency_id_col],
             agency_name_col: agency_pivot_dr[agency_name_col],
-            cert_type_col: agency_pivot_dr[cert_type_col],
+            cert_type_col:   agency_pivot_dr[cert_type_col],
         }
         for i, p in enumerate(period_cols_present_dr):
             final_cols_data[p] = agency_pivot_dr[p].astype(int)
